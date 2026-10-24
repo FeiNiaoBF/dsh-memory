@@ -13,8 +13,10 @@ export class MemoryError extends Error {
   }
 }
 
-const blank = () => ({ version: 1, entries: [] })
+const blank = () => ({ version: 1, entries: [], candidates: [] })
 const revision = text => createHash('sha256').update(text ?? '').digest('hex')
+const fingerprint = entry => createHash('sha256').update(JSON.stringify(entry)).digest('hex')
+const exactId = value => typeof value === 'string' && /^[0-9a-f-]{36}$/.test(value)
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const timestamp = value => typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
 
@@ -31,7 +33,9 @@ function parse(text) {
   let data
   try { data = JSON.parse(text) }
   catch { throw new MemoryError('DATA_CORRUPT', 'Memory JSON is invalid; restore a backup before retrying') }
-  if (!object(data) || ![1, 2].includes(data.version) || !Array.isArray(data.entries) || Object.keys(data).some(key => !['version', 'entries'].includes(key))) {
+  if (!object(data) || ![1, 2, 3].includes(data.version) || !Array.isArray(data.entries) ||
+      (data.version === 3 ? !Array.isArray(data.candidates) || Object.keys(data).some(key => !['version', 'entries', 'candidates'].includes(key)) :
+        Object.keys(data).some(key => !['version', 'entries'].includes(key)))) {
     throw new MemoryError('DATA_CORRUPT', 'Memory format is unknown; restore or migrate it before retrying')
   }
   const ids = new Set()
@@ -55,7 +59,23 @@ function parse(text) {
     }
     ids.add(entry.id)
   }
-  return data
+  for (const candidate of data.candidates ?? []) {
+    if (!object(candidate) || !exactId(candidate.id) || ids.has(candidate.id) ||
+        typeof candidate.content !== 'string' || !candidate.content.trim() || candidate.content.length > 2000 ||
+        !['global', 'workspace'].includes(candidate.scope) ||
+        (candidate.scope === 'workspace' ? typeof candidate.workspace !== 'string' || !candidate.workspace : candidate.workspace !== null) ||
+        (candidate.replaceId === null ? candidate.replaceFingerprint !== null :
+          !exactId(candidate.replaceId) || typeof candidate.replaceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(candidate.replaceFingerprint)) ||
+        typeof candidate.sessionId !== 'string' || !candidate.sessionId ||
+        (candidate.language !== undefined && !['zh', 'en'].includes(candidate.language)) ||
+        !Number.isSafeInteger(candidate.proposedAfterSeq) || candidate.proposedAfterSeq < 0 ||
+        !timestamp(candidate.createdAt) || !timestamp(candidate.updatedAt) ||
+        Object.keys(candidate).some(key => !['id','content','scope','workspace','replaceId','replaceFingerprint','sessionId','language','proposedAfterSeq','createdAt','updatedAt'].includes(key))) {
+      throw new MemoryError('DATA_CORRUPT', 'Memory candidate is invalid; restore a backup before retrying')
+    }
+    ids.add(candidate.id)
+  }
+  return { ...data, candidates: data.candidates ?? [] }
 }
 
 async function read(path) {
@@ -107,7 +127,8 @@ export class MemoryStore {
         throw new MemoryError('STALE_REVISION', 'Memory changed since the last list; list again and retry')
       }
       const value = await operation(state)
-      state.version = 2
+      if (state.version === 3 || state.candidates.length) state.version = 3
+      else { state.version = 2; delete state.candidates }
       const next = JSON.stringify(state, null, 2) + '\n'
       parse(next)
       if (revision(await read(this.path)) !== revision(previous)) {
@@ -146,6 +167,75 @@ export class MemoryStore {
       const entry = match(state.entries, input.id, input.workspace)
       state.entries.splice(state.entries.indexOf(entry), 1)
       return { id: entry.id, deleted: true }
+    })
+  }
+  async propose(input) {
+    return this.mutate(input.expectedRevision, state => {
+      if (typeof input.content !== 'string' || !input.content.trim() || input.content.length > 2000) throw new MemoryError('INVALID_CONTENT', 'Candidate content must contain 1–2000 characters')
+      if (!['global', 'workspace'].includes(input.scope) || (input.scope === 'workspace' && !input.workspace)) throw new MemoryError('INVALID_SCOPE', 'Choose global or a resolved workspace')
+      if (typeof input.sessionId !== 'string' || !input.sessionId || !Number.isSafeInteger(input.proposedAfterSeq) || input.proposedAfterSeq < 0) throw new MemoryError('AGENT_REQUIRED', 'A live user message is required to propose a candidate')
+      if (!['zh','en'].includes(input.language ?? 'zh')) throw new MemoryError('INVALID_LANGUAGE', 'Choose zh or en')
+      if (state.candidates.length >= 100 || state.candidates.filter(candidate => candidate.sessionId === input.sessionId).length >= 25) throw new MemoryError('CANDIDATE_LIMIT', 'Resolve pending candidates before creating more')
+      let replaced
+      if (input.replaceId !== undefined) {
+        if (!exactId(input.replaceId)) throw new MemoryError('ID_REQUIRED', 'Supply the exact old memory id for replacement')
+        replaced = match(state.entries, input.replaceId, input.workspace)
+        if (replaced.scope !== input.scope || (replaced.scope === 'workspace' && replaced.workspace !== input.workspace)) throw new MemoryError('INVALID_SCOPE', 'A replacement must keep the old memory scope and workspace')
+      }
+      const now = new Date().toISOString()
+      const candidate = { id: randomUUID(), content: input.content.trim(), scope: input.scope,
+        workspace: input.scope === 'workspace' ? input.workspace : null,
+        replaceId: replaced?.id ?? null, replaceFingerprint: replaced ? fingerprint(replaced) : null,
+        sessionId: input.sessionId, language: input.language ?? 'zh', proposedAfterSeq: input.proposedAfterSeq, createdAt: now, updatedAt: now }
+      state.candidates.push(candidate)
+      return { candidate, replaces: replaced ? reviewed(replaced) : null }
+    })
+  }
+  async pending(workspace, sessionId) {
+    const state = await this.snapshotAsync()
+    const entries = state.candidates.filter(candidate => candidate.sessionId === sessionId && visible(candidate, workspace))
+    return { revision: state.revision, total: entries.length, candidates: entries }
+  }
+  async candidate(id, workspace, sessionId) {
+    const state = await this.snapshotAsync()
+    return state.candidates.find(candidate => candidate.id === id && candidate.sessionId === sessionId && visible(candidate, workspace)) ?? null
+  }
+  async decide(input) {
+    return this.mutate(input.expectedRevision, state => {
+      const index = state.candidates.findIndex(candidate => candidate.id === input.id && candidate.sessionId === input.sessionId && visible(candidate, input.workspace))
+      if (index < 0) throw new MemoryError('CANDIDATE_NOT_FOUND', 'No pending candidate is visible in this session and workspace')
+      const candidate = state.candidates[index]
+      const source = input.source
+      if (source?.sessionId !== candidate.sessionId || !Number.isSafeInteger(source.seq) || source.seq <= candidate.proposedAfterSeq ||
+          (candidate.scope === 'workspace' && source.workspace !== candidate.workspace)) throw new MemoryError('DECISION_SOURCE_REQUIRED', 'Use a newer direct user message in the candidate workspace')
+      if (input.action === 'revise') {
+        if (typeof input.content !== 'string' || !input.content.trim() || input.content.length > 2000) throw new MemoryError('INVALID_CONTENT', 'Candidate content must contain 1–2000 characters')
+        candidate.content = input.content.trim()
+        candidate.proposedAfterSeq = source.seq
+        candidate.updatedAt = new Date().toISOString()
+        return { action: 'revised', candidate }
+      }
+      if (input.action === 'reject') {
+        state.candidates.splice(index, 1)
+        return { action: 'rejected', candidateId: candidate.id }
+      }
+      if (input.action !== 'confirm') throw new MemoryError('INVALID_ACTION', 'Choose confirm, reject or revise')
+      if (source.quote !== candidate.content || (candidate.scope === 'global' && !source.globalScopeQuote)) throw new MemoryError('DECISION_SOURCE_REQUIRED', 'Confirmation must cite the full candidate content and Global scope when applicable')
+      let entry
+      if (candidate.replaceId !== null) {
+        entry = state.entries.find(item => item.id === candidate.replaceId)
+        if (!entry || fingerprint(entry) !== candidate.replaceFingerprint) throw new MemoryError('TARGET_CHANGED', 'The old memory changed since this candidate was proposed; reject it and propose again')
+        entry.content = candidate.content
+        entry.source = source
+        entry.verifiedAt = new Date().toISOString()
+      } else {
+        const now = new Date().toISOString()
+        entry = { id: randomUUID(), content: candidate.content, scope: candidate.scope,
+          workspace: candidate.workspace, source, createdAt: now, verifiedAt: now }
+        state.entries.push(entry)
+      }
+      state.candidates.splice(index, 1)
+      return { action: candidate.replaceId === null ? 'added' : 'replaced', candidateId: candidate.id, entry: reviewed(entry) }
     })
   }
   async search(workspace, query, limit = 5) {
