@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Memory">
+  <rect x="7" y="8" width="50" height="48" rx="11" fill="#284b63"/>
+  <path d="M19 20h26M19 29h26M19 38h16" stroke="#e9f2ed" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="44" cy="42" r="8" fill="#8ad1b2"/>
+  <path d="m41 42 2 2 4-5" fill="none" stroke="#284b63" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

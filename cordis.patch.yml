@@ -1,0 +1,6 @@
+- insert:
+    - id: local-long-term-memory
+      name: '@local/dsh-memory'
+      config:
+        promptEntries: 0
+        promptCharacters: 1200
