@@ -156,15 +156,18 @@ test('prompt bounds are strict and background content stays labeled', () => {
   assert.equal(renderPrompt(entries, { promptEntries: 0, promptCharacters: 180 }), '')
 })
 
-test('Cordis context unload disposes all six tools and prompt contribution', () => {
+test('Cordis context unload disposes all seven tools and prompt contribution', () => {
   const tools = new Map(), prompts = new Map(), disposers = []
   const owner = {
     tools: { register(definition) { tools.set(definition.name, definition); const undo = () => tools.delete(definition.name); disposers.push(undo); return undo } },
     systemPrompt: { getContextOrder: () => 100, context(definition) { prompts.set(definition.name, definition); const undo = () => prompts.delete(definition.name); disposers.push(undo); return undo } }
   }
   apply(owner, { promptEntries: 0, promptCharacters: 0 })
-  assert.equal(tools.size, 6)
+  assert.equal(tools.size, 7)
   assert.deepEqual(tools.get('memory_search').parameters.required, ['query'])
+  assert.deepEqual(tools.get('memory_decide').parameters.required, ['id','action','expected_revision'])
+  assert.equal(tools.has('memory_add'), false)
+  assert.equal(tools.has('memory_update'), false)
   assert.equal(prompts.size, 1)
   for (const dispose of disposers.reverse()) dispose()
   assert.equal(tools.size, 0)
