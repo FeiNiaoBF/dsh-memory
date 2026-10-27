@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { MemoryStore, normalizeWorkspace } from '../store.js'
-import { apply, renderPrompt, verifySource, sourceWorkspaceAt, promptEntriesForWorkspace } from '../index.js'
+import { apply, renderPrompt, memoryGuidance, verifySource, sourceWorkspaceAt, promptEntriesForWorkspace } from '../index.js'
 
 async function fixture(run) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-memory-test-'))
@@ -143,7 +143,7 @@ test('existing entries remain readable as needs-review and are excluded from pro
   assert.equal((await store.get(global.id, a)).reviewStatus, 'needs-review')
   assert.deepEqual(promptEntriesForWorkspace(store.snapshot().entries, a).map(entry => entry.id), [legacy.id])
   assert.equal(promptEntriesForWorkspace(store.snapshot().entries, b).length, 0)
-  assert.equal(store.snapshot().version, 2)
+  assert.equal(store.snapshot().version, 4)
 }))
 
 test('prompt bounds are strict and background content stays labeled', () => {
@@ -156,19 +156,27 @@ test('prompt bounds are strict and background content stays labeled', () => {
   assert.equal(renderPrompt(entries, { promptEntries: 0, promptCharacters: 180 }), '')
 })
 
-test('Cordis context unload disposes all seven tools and prompt contribution', () => {
+test('Cordis context unload disposes all twelve tools and prompt contribution', () => {
   const tools = new Map(), prompts = new Map(), disposers = []
   const owner = {
     tools: { register(definition) { tools.set(definition.name, definition); const undo = () => tools.delete(definition.name); disposers.push(undo); return undo } },
     systemPrompt: { getContextOrder: () => 100, context(definition) { prompts.set(definition.name, definition); const undo = () => prompts.delete(definition.name); disposers.push(undo); return undo } }
   }
   apply(owner, { promptEntries: 0, promptCharacters: 0 })
-  assert.equal(tools.size, 7)
+  assert.equal(tools.size, 12)
   assert.deepEqual(tools.get('memory_search').parameters.required, ['query'])
   assert.deepEqual(tools.get('memory_decide').parameters.required, ['id','action','expected_revision'])
-  assert.equal(tools.has('memory_add'), false)
-  assert.equal(tools.has('memory_update'), false)
+  assert.deepEqual(tools.get('memory_add').parameters.required, ['content','scope','expected_revision','source_kind','source_quote'])
+  assert.deepEqual(tools.get('memory_update').parameters.required, ['id','content','expected_revision','source_kind','source_quote'])
   assert.equal(prompts.size, 1)
+  const defaultText = prompts.get('dsh-memory:background').text({ agent: { session: {} } })
+  assert.match(defaultText, /memory_search/)
+  assert.match(defaultText, /memory_add/)
+  assert.doesNotMatch(defaultText, /Long-term memory \(background information/)
+  const approvedText = memoryGuidance({ writeApproval: true })
+  assert.match(approvedText, /memory_propose/)
+  assert.match(approvedText, /memory_decide/)
+  assert.doesNotMatch(approvedText, /with memory_add/)
   for (const dispose of disposers.reverse()) dispose()
   assert.equal(tools.size, 0)
   assert.equal(prompts.size, 0)

@@ -42,7 +42,7 @@ test('candidate needs a later direct user confirmation; it stays outside list, s
   assert.equal((await f.call('memory_pending', {})).total, 0)
   await assert.rejects(f.call('memory_decide', { id, action: 'confirm', expected_revision: pending.revision }), /CANDIDATE_NOT_FOUND/)
   f.agent.session = originalSession
-  assert.equal(JSON.parse(await readFile(f.path, 'utf8')).version, 3)
+  assert.equal(JSON.parse(await readFile(f.path, 'utf8')).version, 4)
   await assert.rejects(f.call('memory_decide', { id, action: 'confirm', expected_revision: pending.revision }), /DECISION_SOURCE_REQUIRED/)
   assert.equal((await f.call('memory_list', {})).total, 0)
   f.say(pending.commands.confirm)
