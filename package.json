@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Explicit, scoped long-term memory for DSH profiles",
+  "description": "Scoped, sourced long-term memory with autonomous writes and optional approval",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
